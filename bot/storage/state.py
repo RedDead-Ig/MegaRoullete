@@ -6,9 +6,13 @@ from collections import deque
 import time
 
 
+# Quantos IDs a gente guarda pra deduplicar globalmente (sessão do bot).
+# 10k é bem tranquilo e evita “recontar” ao trocar janela.
+SEEN_IDS_MAX = 10_000
+
+
 @dataclass
 class BotState:
-    # controle básico
     running: bool = False
 
     # mensagem fixa editável
@@ -17,12 +21,15 @@ class BotState:
 
     # janela e dados
     window_size: int = 40
-    results: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=40))
-    seen_game_ids: Set[str] = field(default_factory=set)
+    results: Deque[Dict[str, Any]] = field(default_factory=deque)
 
-    # acumulados desde o /start (não reseta quando janela muda)
+    # ✅ dedup GLOBAL (não depende da janela)
+    seen_game_ids: Set[str] = field(default_factory=set)
+    seen_game_ids_queue: Deque[str] = field(default_factory=deque)
+
+    # acumulados desde que o processo iniciou
     total_games: int = 0
-    last_number: Optional[int] = None  # último número registrado (rodapé)
+    last_number: Optional[int] = None
 
     # modo “esperando o usuário mandar 20”
     awaiting_window_size: bool = False
@@ -37,19 +44,24 @@ class BotState:
     ws_last_error: Optional[str] = None
     ws_last_msg_ts: float = 0.0
 
+    def __post_init__(self) -> None:
+        # garante maxlen alinhado ao window_size desde o início
+        if not isinstance(self.results, deque) or self.results.maxlen != self.window_size:
+            self.results = deque(list(self.results), maxlen=self.window_size)
+
     def set_window_size(self, n: int) -> None:
-        """Atualiza janela e ajusta o deque sem perder o que for possível."""
+        """Atualiza janela sem resetar dedup global."""
         self.window_size = n
         old = list(self.results)
         self.results = deque(old[-n:], maxlen=n)
-
-        # Recria o set baseado no que ficou (pra não crescer infinito)
-        self.seen_game_ids = {str(r.get("gameId")) for r in self.results if r.get("gameId") is not None}
+        # ⚠️ NÃO mexe no seen_game_ids aqui (senão reconta IDs antigos)
 
     def reset_history(self) -> None:
-        """Limpa histórico (não mexe no total acumulado, por padrão)."""
+        """Limpa histórico visível e dedup (use só se você REALMENTE quiser zerar a sessão)."""
         self.results.clear()
         self.seen_game_ids.clear()
+        self.seen_game_ids_queue.clear()
+        self.total_games = 0
         self.last_number = None
 
     def progress_count(self) -> int:

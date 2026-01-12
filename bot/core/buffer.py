@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from bot.storage.state import BotState
+from bot.storage.state import BotState, SEEN_IDS_MAX
 
 
 def _parse_time(value: Any) -> Optional[datetime]:
@@ -16,13 +16,11 @@ def _parse_time(value: Any) -> Optional[datetime]:
     if not s:
         return None
 
-    # formato já normalizado
     try:
         return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
     except ValueError:
         pass
 
-    # fallback formato original
     try:
         return datetime.strptime(s, "%b %d, %Y %I:%M:%S %p")
     except ValueError:
@@ -43,14 +41,11 @@ def _normalize_game_id(value: Any) -> Optional[str]:
     return s if s else None
 
 
-# ✅ ESSA FUNÇÃO TEM QUE EXISTIR (é ela que o main.py importa)
 def add_results(state: BotState, incoming: Iterable[Dict[str, Any]]) -> int:
     """
-    - dedup por gameId
-    - ordena por time
-    - adiciona na janela
-    - incrementa total_games
-    - atualiza last_number
+    Dedup GLOBAL por gameId:
+    - se o websocket re-enviar resultados antigos, NÃO aumenta total_games
+    - trocar window_size NÃO reseta dedup
     """
     items: List[Dict[str, Any]] = list(incoming or [])
     if not items:
@@ -66,10 +61,19 @@ def add_results(state: BotState, incoming: Iterable[Dict[str, Any]]) -> int:
         if gid is None:
             continue
 
+        # ✅ dedup global
         if gid in state.seen_game_ids:
             continue
 
         state.seen_game_ids.add(gid)
+        state.seen_game_ids_queue.append(gid)
+
+        # cap de memória (remove os mais antigos do set)
+        while len(state.seen_game_ids_queue) > SEEN_IDS_MAX:
+            old = state.seen_game_ids_queue.popleft()
+            state.seen_game_ids.discard(old)
+
+        # adiciona na janela visível (deque já controla maxlen)
         state.results.append(r)
         added += 1
 
@@ -82,10 +86,6 @@ def add_results(state: BotState, incoming: Iterable[Dict[str, Any]]) -> int:
         state.total_games += added
         if last_num is not None:
             state.last_number = last_num
-
-    # Anti-set infinito
-    if len(state.seen_game_ids) > max(200, state.window_size * 3):
-        state.seen_game_ids = {str(x.get("gameId")) for x in state.results if x.get("gameId") is not None}
 
     return added
 
