@@ -1,7 +1,6 @@
 ﻿from __future__ import annotations
 
 import asyncio
-
 from telegram.ext import Application
 
 from bot.config import (
@@ -17,6 +16,7 @@ from bot.core.formatter import render_report
 from bot.core.websocket_client import WSConfig, ws_run_forever
 from bot.storage.state import BotState
 from bot.telegram.handlers import build_handlers
+from bot.telegram.messenger import edit_fixed_message
 
 
 def _get_state(app: Application) -> BotState:
@@ -25,36 +25,27 @@ def _get_state(app: Application) -> BotState:
     return app.bot_data["state"]
 
 
-async def main() -> None:
-    if not TELEGRAM_BOT_TOKEN:
-        raise RuntimeError("Faltou TELEGRAM_BOT_TOKEN nas variáveis de ambiente.")
-
-    # Telegram app
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-    # registra comandos
-    for h in build_handlers():
-        app.add_handler(h)
-
+async def _post_init(app: Application) -> None:
+    """Roda quando o app inicia. Aqui a gente sobe o WebSocket em background."""
     state = _get_state(app)
 
-    # callback quando chegar batch do websocket
+    ws_cfg = WSConfig(
+        ws_url=ROULETTE_WS_URL,
+        casino_id=CASINO_ID,
+        currency=CURRENCY,
+        table_key=TABLE_KEY,
+    )
+
     async def on_results(batch):
-        # só processa quando bot está rodando (evita editar parado)
+        # só processa se o bot estiver ligado via /start
         if not state.running:
             return
 
-        # adiciona resultados na janela
         added = add_results(state, batch)
         if added <= 0:
             return
 
-        # renderiza texto final
         text = render_report(state)
-
-        # edita a mensagem fixa (se existir)
-        # (Se ainda não teve /start, não tem message_id — então não faz nada)
-        from bot.telegram.messenger import edit_fixed_message
 
         await edit_fixed_message(
             bot=app.bot,
@@ -65,22 +56,14 @@ async def main() -> None:
         )
 
     def should_run_ws() -> bool:
-        # O WS roda sempre, mas o loop pode ser encerrado se o app for fechar.
+        # o cancel do task cuida de parar
         return True
 
     def on_connection_change(connected: bool, error_msg: str | None):
         state.ws_connected = connected
         state.ws_last_error = error_msg
 
-    ws_cfg = WSConfig(
-        ws_url=ROULETTE_WS_URL,
-        casino_id=CASINO_ID,
-        currency=CURRENCY,
-        table_key=TABLE_KEY,
-    )
-
-    # task do websocket em background (dentro do mesmo event loop do telegram)
-    async def start_ws_task():
+    async def ws_task():
         await ws_run_forever(
             cfg=ws_cfg,
             on_results=on_results,
@@ -88,28 +71,39 @@ async def main() -> None:
             on_connection_change=on_connection_change,
         )
 
-    # Inicia e roda
-    await app.initialize()
-    await app.start()
+    # cria task dentro do loop do PTB
+    app.bot_data["ws_task"] = app.create_task(ws_task(), name="ws_task")
 
-    # cria a tarefa do WS
-    ws_task = asyncio.create_task(start_ws_task(), name="ws_task")
 
-    # start polling (não retorna até parar)
-    try:
-        await app.updater.start_polling(drop_pending_updates=True)
-        await app.updater.idle()
-    finally:
-        ws_task.cancel()
+async def _post_shutdown(app: Application) -> None:
+    """Roda quando o app vai desligar. Cancela o WebSocket bonitinho."""
+    task = app.bot_data.get("ws_task")
+    if task:
+        task.cancel()
         try:
-            await ws_task
+            await task
         except Exception:
             pass
 
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
+
+def run() -> None:
+    if not TELEGRAM_BOT_TOKEN:
+        raise RuntimeError("Faltou TELEGRAM_BOT_TOKEN nas variáveis de ambiente.")
+
+    app = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(_post_init)
+        .post_shutdown(_post_shutdown)
+        .build()
+    )
+
+    for h in build_handlers():
+        app.add_handler(h)
+
+    # run_polling já cuida de init/start/idle/shutdown do jeito certo
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run()
