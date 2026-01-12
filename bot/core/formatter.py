@@ -1,8 +1,6 @@
-﻿# Monta o texto do relatório no formato final (com espaçamento premium)
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional
 
 from bot.core.analytics import compute_analytics, get_cor
 from bot.core.buffer import current_window_label, last_n_results
@@ -18,65 +16,54 @@ def _chunk(items: List[Any], size: int) -> List[List[Any]]:
 
 
 def _grid_numbers(nums: List[int], per_row: int = 5) -> str:
-    """
-    Monta grid monoespaçado “ok” pro Telegram.
-    Ex: 12  0  34  7  19
-    """
     rows = _chunk(nums, per_row)
+    if not rows:
+        return "—"
     lines = []
     for row in rows:
-        # alinhamento simples: número com largura 2 (0..36), mas sem ficar travado demais
-        line = "  ".join(f"{n:>2}" for n in row)
-        lines.append(line)
-    return "\n".join(lines) if lines else "—"
+        lines.append("  ".join(f"{n:>2}" for n in row))
+    return "\n".join(lines)
 
 
 def _grid_colors(nums: List[int], per_row: int = 5) -> str:
-    """
-    Transforma números em emojis de cor.
-    Vermelho 🔴 | Preto ⚫ | Zero 🟢
-    """
     def to_emoji(n: int) -> str:
         if n == 0:
             return "🟢"
         return "🔴" if get_cor(n) == "Vermelho" else "⚫"
 
     rows = _chunk(nums, per_row)
-    lines = []
-    for row in rows:
-        lines.append(" ".join(to_emoji(n) for n in row))
-    return "\n".join(lines) if lines else "—"
+    if not rows:
+        return "—"
+    return "\n".join(" ".join(to_emoji(n) for n in row) for row in rows)
 
 
 def _extract_numbers(results: List[Dict[str, Any]]) -> List[int]:
-    nums: List[int] = []
+    out: List[int] = []
     for r in results:
-        v = r.get("result", r.get("number"))
         try:
-            nums.append(int(v))
-        except (TypeError, ValueError):
+            n = int(r.get("result", r.get("number")))
+        except Exception:
             continue
-    return nums
+        if 0 <= n <= 36:
+            out.append(n)
+    return out
 
 
 def render_report(state: BotState) -> str:
-    """
-    Renderiza a mensagem COMPLETA do bot (a que será editada).
-    """
-    now = datetime.now()
-    date_str = texts.fmt_date_br(now)
+    # horário e data CERTOS (UTC−3)
+    date_str = texts.fmt_date_br()
 
     results = last_n_results(state)
     nums = _extract_numbers(results)
 
-    # janela “visível” enquanto não completou
-    visible_window = current_window_label(state)
+    visible_window = current_window_label(state)  # 0..window_size
     ready = len(results) >= state.window_size
 
-    # título em execução
-    title = texts.running_title_block(window=state.window_size, ready=ready)
+    header = texts.header_block(ROULETTE_NAME, date_str)
+    updated = texts.updated_time_block()
 
-    # progresso
+    status = texts.status_block(total_games=state.total_games, window_size=state.window_size)
+
     progress = texts.loading_block(
         progress_bar=state.progress_bar(20),
         count=state.progress_count(),
@@ -84,45 +71,47 @@ def render_report(state: BotState) -> str:
         percent=state.progress_percent(),
     )
 
-    # grids (mostra a janela atual, não necessariamente cheia)
-    numbers_grid = _grid_numbers(nums, per_row=5)
-    colors_grid = _grid_colors(nums, per_row=5)
+    numbers = texts.numbers_block(_grid_numbers(nums, 5), total=len(nums))
+    colors = texts.colors_block(_grid_colors(nums, 5), total=len(nums))
 
-    numbers = texts.numbers_block("ÚLTIMOS NÚMEROS", numbers_grid, total=len(nums))
-    colors = texts.colors_block("CORES", colors_grid, total=len(nums))
+    analytics = compute_analytics(results, window_label=visible_window)
 
-    # analytics em cima do que temos (até completar)
-    analytics = compute_analytics(results, window=visible_window)
-
-    counts = texts.count_block(
+    contagem = texts.count_block(
         window=visible_window,
-        pares=analytics.pares,
-        impares=analytics.impares,
-        zeros=analytics.zeros,
-        vermelhos=analytics.vermelhos,
-        pretos=analytics.pretos,
-        verdes=analytics.verdes,
-        baixos=analytics.baixos,
-        altos=analytics.altos,
+        total_games=state.total_games,
+        pares=analytics.pares, pct_pares=analytics.pct_pares,
+        impares=analytics.impares, pct_impares=analytics.pct_impares,
+        vermelhos=analytics.vermelhos, pct_vermelhos=analytics.pct_vermelhos,
+        pretos=analytics.pretos, pct_pretos=analytics.pct_pretos,
+        baixos=analytics.baixos, pct_baixos=analytics.pct_baixos,
+        altos=analytics.altos, pct_altos=analytics.pct_altos,
     )
 
-    dom = texts.dominance_block(
-        window=visible_window,
-        duzia=analytics.duzia_predominante,
-        coluna=analytics.coluna_predominante,
+    zeros = texts.zeros_block(window=visible_window, zeros=analytics.zeros, pct_zeros=analytics.pct_zeros)
+
+    duzias = texts.dominance_duzias_block(window=visible_window, items=analytics.duzias_rank)
+    colunas = texts.dominance_colunas_block(window=visible_window, items=analytics.colunas_rank)
+    regioes = texts.region_rank_block(window=visible_window, items=analytics.regioes_rank)
+
+    footer = texts.footer_block(total_games=state.total_games, last_number=state.last_number)
+
+    msg = (
+        header
+        + updated
+        + status
+        + progress
+        + numbers
+        + colors
+        + contagem
+        + zeros
+        + duzias
+        + colunas
+        + regioes
+        + footer
     )
 
-    # header + tudo
-    msg = texts.header_block(ROULETTE_NAME, date_str)
-    msg += "\n\n" + title
-    msg += progress
-    msg += numbers
-    msg += colors
-    msg += counts
-    msg += dom
-
-    # status WS (se quiser mostrar discretamente)
-    if not state.ws_connected and state.ws_last_error:
-        msg += texts.error_block(f"WS offline: {state.ws_last_error}")
+    # se WS estiver caído, mostra uma linha (discreta) no final
+    if (not state.ws_connected) and state.ws_last_error:
+        msg += f"\n⚠️ WS offline: {state.ws_last_error}\n"
 
     return msg

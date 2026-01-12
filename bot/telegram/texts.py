@@ -1,25 +1,49 @@
-﻿# Templates de mensagem (o textão bonitão com espaçamento)
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional, Tuple
+
+import pytz
+
+from bot.core.analytics import RankItem
+
+
+TZ_NAME = "America/Sao_Paulo"
+
+
+def now_sp() -> datetime:
+    tz = pytz.timezone(TZ_NAME)
+    return datetime.now(tz)
 
 
 def fmt_date_br(dt: Optional[datetime] = None) -> str:
-    dt = dt or datetime.now()
+    dt = dt or now_sp()
     return dt.strftime("%d/%m/%Y")
 
 
 def fmt_time_br(dt: Optional[datetime] = None) -> str:
-    dt = dt or datetime.now()
+    dt = dt or now_sp()
     return dt.strftime("%H:%M:%S")
 
 
 def header_block(roulette_name: str, date_str: str) -> str:
     return (
-        "🤖 Robô de análise iniciado\n\n"
+        "✅ Relatório ativo (janela deslizante)\n\n"
         f"🎰 ROLETA: {roulette_name}\n"
         f"📅 Data: {date_str}\n"
+    )
+
+
+def updated_time_block() -> str:
+    return f"⏱ Atualizado: {fmt_time_br()} (UTC−3)\n"
+
+
+def status_block(total_games: int, window_size: int) -> str:
+    return (
+        "\n\n"
+        "📌 STATUS\n\n"
+        f"• Quantidade de jogos (total): {total_games}\n\n"
+        f"• Janela analisada: {window_size} (últimos {window_size})\n"
     )
 
 
@@ -31,74 +55,107 @@ def loading_block(progress_bar: str, count: int, window: int, percent: int) -> s
     )
 
 
-def numbers_block(title: str, grid_text: str, total: int) -> str:
+def numbers_block(grid_text: str, total: int) -> str:
     return (
         "\n\n"
-        f"🔢 {title} ({total})\n\n"
+        f"🔢 ÚLTIMOS NÚMEROS ({total})\n\n"
         f"{grid_text}\n"
     )
 
 
-def colors_block(title: str, grid_text: str, total: int) -> str:
+def colors_block(grid_text: str, total: int) -> str:
     return (
         "\n\n"
-        f"🎨 {title} ({total})\n\n"
+        f"🎨 CORES ({total})\n\n"
         f"{grid_text}\n"
     )
 
 
 def count_block(
     window: int,
-    pares: int,
-    impares: int,
-    zeros: int,
-    vermelhos: int,
-    pretos: int,
-    verdes: int,
-    baixos: int,
-    altos: int,
+    total_games: int,
+    pares: int, pct_pares: int,
+    impares: int, pct_impares: int,
+    vermelhos: int, pct_vermelhos: int,
+    pretos: int, pct_pretos: int,
+    baixos: int, pct_baixos: int,
+    altos: int, pct_altos: int,
 ) -> str:
-    # Espaçamento EXATO do jeito que você pediu (linha em branco entre itens)
     return (
         "\n\n"
-        f"📌 CONTAGEM ({window})\n\n"
-        f"• Pares: {pares}\n\n"
-        f"• Ímpares: {impares}\n\n"
-        f"• Zero: {zeros} 🟢\n\n\n"
-        f"• Vermelhos: {vermelhos} 🔴\n\n"
-        f"• Pretos: {pretos} ⚫\n\n"
-        f"• Verdes: {verdes} 🟢\n\n\n"
-        f"• Baixos (1–18): {baixos} ⬇️\n\n"
-        f"• Altos (19–36): {altos} ⬆️\n"
+        f"📌 CONTAGEM (janela {window} | total {total_games})\n\n"
+        f"• Pares: {pares} ({pct_pares}%)\n\n"
+        f"• Ímpares: {impares} ({pct_impares}%)\n\n\n"
+        f"• Vermelhos: {vermelhos} ({pct_vermelhos}%) 🔴\n\n"
+        f"• Pretos: {pretos} ({pct_pretos}%) ⚫\n\n\n"
+        f"• Baixos (1–18): {baixos} ({pct_baixos}%) ⬇️\n\n"
+        f"• Altos (19–36): {altos} ({pct_altos}%) ⬆️\n"
     )
 
 
-def dominance_block(window: int, duzia: str, coluna: str) -> str:
+def zeros_block(window: int, zeros: int, pct_zeros: int) -> str:
     return (
         "\n\n"
-        f"📍 DOMINÂNCIA ({window})\n\n"
-        f"• Dúzia predominante: {duzia}\n\n"
-        f"• Coluna predominante: {coluna}\n"
+        f"📌 ZEROS (janela {window})\n\n"
+        f"• Quantidade de ZEROS: {zeros} ({pct_zeros}%) 🟢\n"
     )
 
 
-def running_title_block(window: int, ready: bool) -> str:
-    if ready:
-        return (
-            "✅ Janela completa! Relatório ativo\n\n"
-            f"📊 RELATÓRIO — Janela: Últimos {window}\n"
-            f"⏱ Atualizado: {fmt_time_br()}\n"
-        )
+def _medal(i: int) -> str:
+    return "🥇" if i == 0 else ("🥈" if i == 1 else "🥉")
+
+
+def dominance_duzias_block(window: int, items: List[RankItem]) -> str:
+    # items já vem ordenado
+    lines = []
+    for i, it in enumerate(items[:3]):
+        if it.key == "1ª":
+            label = "1ª Dúzia (1–12)"
+        elif it.key == "2ª":
+            label = "2ª Dúzia (13–24)"
+        else:
+            label = "3ª Dúzia (25–36)"
+        lines.append(f"• {label}: {it.pct}% {_medal(i)}")
     return (
-        "🤖 Robô de análise em execução\n\n"
-        f"📊 PRÉ-RELATÓRIO — Montando janela: {window}\n"
-        f"⏱ Atualizado: {fmt_time_br()}\n"
+        "\n\n"
+        f"📍 DOMINÂNCIA — DÚZIAS (janela {window} | ranking)\n\n"
+        + "\n\n".join(lines)
+        + "\n"
     )
 
 
-def error_block(msg: str) -> str:
+def dominance_colunas_block(window: int, items: List[RankItem]) -> str:
+    lines = []
+    for i, it in enumerate(items[:3]):
+        label = f"{it.key} Coluna"
+        lines.append(f"• {label}: {it.pct}% {_medal(i)}")
     return (
         "\n\n"
-        "⚠️ ERRO / CONEXÃO\n\n"
-        f"{msg}\n"
+        f"📍 DOMINÂNCIA — COLUNAS (janela {window} | ranking)\n\n"
+        + "\n\n".join(lines)
+        + "\n"
+    )
+
+
+def region_rank_block(window: int, items: List[RankItem]) -> str:
+    lines = []
+    for i, it in enumerate(items[:3]):
+        lines.append(f"• {it.key}: {it.pct}% {_medal(i)}")
+    return (
+        "\n\n"
+        f"📌 REGIÃO (janela {window} | ranking)\n\n"
+        + "\n\n".join(lines)
+        + "\n"
+    )
+
+
+def footer_block(total_games: int, last_number: Optional[int]) -> str:
+    last_txt = "—" if last_number is None else str(last_number)
+    return (
+        "\n\n"
+        "────────────────────\n"
+        "📊 RESUMO FINAL\n\n"
+        f"• Total de resultados acumulados: {total_games}\n\n"
+        f"• Último número registrado: {last_txt}\n"
+        "────────────────────\n"
     )
