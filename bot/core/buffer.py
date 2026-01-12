@@ -1,80 +1,98 @@
 ﻿from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Optional, Deque, Dict, Any, Set
-from collections import deque
-import time
+from datetime import datetime
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+from bot.storage.state import BotState
 
 
-@dataclass
-class BotState:
-    # controle básico
-    running: bool = False
+def _parse_time(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
 
-    # mensagem fixa editável
-    chat_id: Optional[int] = None
-    message_id: Optional[int] = None
+    s = str(value).strip()
+    if not s:
+        return None
 
-    # janela e dados
-    window_size: int = 40
-    results: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=40))
-    seen_game_ids: Set[str] = field(default_factory=set)
+    # formato já normalizado
+    try:
+        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        pass
 
-    # acumulados desde o /start (não reseta quando janela muda)
-    total_games: int = 0
-    last_number: Optional[int] = None  # último número registrado (rodapé)
+    # fallback formato original
+    try:
+        return datetime.strptime(s, "%b %d, %Y %I:%M:%S %p")
+    except ValueError:
+        return None
 
-    # modo “esperando o usuário mandar 20”
-    awaiting_window_size: bool = False
-    awaiting_window_size_chat_id: Optional[int] = None
 
-    # anti-spam / performance
-    last_render_text: str = ""
-    last_edit_ts: float = 0.0
+def _time_key(result: Dict[str, Any]) -> Tuple[int, str]:
+    dt = _parse_time(result.get("time"))
+    ts = int(dt.timestamp()) if dt else 0
+    gid = str(result.get("gameId", ""))
+    return (ts, gid)
 
-    # status WS
-    ws_connected: bool = False
-    ws_last_error: Optional[str] = None
-    ws_last_msg_ts: float = 0.0
 
-    def set_window_size(self, n: int) -> None:
-        """Atualiza janela e ajusta o deque sem perder o que for possível."""
-        self.window_size = n
-        old = list(self.results)
-        self.results = deque(old[-n:], maxlen=n)
+def _normalize_game_id(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s if s else None
 
-        # Recria o set baseado no que ficou (pra não crescer infinito)
-        self.seen_game_ids = {str(r.get("gameId")) for r in self.results if r.get("gameId") is not None}
 
-    def reset_history(self) -> None:
-        """Limpa histórico (não mexe no total acumulado, por padrão)."""
-        self.results.clear()
-        self.seen_game_ids.clear()
-        self.last_number = None
+# ✅ ESSA FUNÇÃO TEM QUE EXISTIR (é ela que o main.py importa)
+def add_results(state: BotState, incoming: Iterable[Dict[str, Any]]) -> int:
+    """
+    - dedup por gameId
+    - ordena por time
+    - adiciona na janela
+    - incrementa total_games
+    - atualiza last_number
+    """
+    items: List[Dict[str, Any]] = list(incoming or [])
+    if not items:
+        return 0
 
-    def progress_count(self) -> int:
-        return min(len(self.results), self.window_size)
+    items.sort(key=_time_key)
 
-    def progress_percent(self) -> int:
-        if self.window_size <= 0:
-            return 0
-        return int((self.progress_count() / self.window_size) * 100)
+    added = 0
+    last_num: Optional[int] = None
 
-    def progress_bar(self, width: int = 20) -> str:
-        if self.window_size <= 0:
-            return "░" * width
-        filled = int((self.progress_count() / self.window_size) * width)
-        filled = max(0, min(width, filled))
-        return ("█" * filled) + ("░" * (width - filled))
+    for r in items:
+        gid = _normalize_game_id(r.get("gameId"))
+        if gid is None:
+            continue
 
-    def can_edit_now(self, min_seconds_between_edits: float) -> bool:
-        now = time.time()
-        return (now - self.last_edit_ts) >= float(min_seconds_between_edits)
+        if gid in state.seen_game_ids:
+            continue
 
-    def mark_edited(self, new_text: str) -> None:
-        self.last_render_text = new_text
-        self.last_edit_ts = time.time()
+        state.seen_game_ids.add(gid)
+        state.results.append(r)
+        added += 1
 
-    def set_fixed_message(self, chat_id: int, message_id: int) -> None:
-        self.chat_id = chat_id
-        self.message_id = message_id
+        try:
+            last_num = int(r.get("result", r.get("number")))
+        except Exception:
+            pass
+
+    if added > 0:
+        state.total_games += added
+        if last_num is not None:
+            state.last_number = last_num
+
+    # Anti-set infinito
+    if len(state.seen_game_ids) > max(200, state.window_size * 3):
+        state.seen_game_ids = {str(x.get("gameId")) for x in state.results if x.get("gameId") is not None}
+
+    return added
+
+
+def current_window_label(state: BotState) -> int:
+    return state.window_size if len(state.results) >= state.window_size else len(state.results)
+
+
+def last_n_results(state: BotState) -> List[Dict[str, Any]]:
+    return list(state.results)
