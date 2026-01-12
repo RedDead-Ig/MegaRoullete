@@ -1,112 +1,254 @@
 ﻿from __future__ import annotations
 
-import os
-from typing import List, Optional
+from typing import List
+
+from telegram import Update
+from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
 
 
-# =========================
-# HELPERS
-# =========================
-def _get_env(name: str, default: str = "") -> str:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    return str(v).strip()
+# NOTE:
+# - Imports internos (lazy) pra evitar import circular.
+# - build_handlers() GARANTIDO no final do arquivo.
 
 
-def _get_int(name: str, default: int) -> int:
-    raw = _get_env(name, str(default))
-    try:
-        return int(raw)
-    except ValueError:
-        return default
+def _get_state(context: ContextTypes.DEFAULT_TYPE):
+    from bot.storage.state import BotState
+    from bot.config import DEFAULT_WINDOW_SIZE
+
+    app = context.application
+    if "state" not in app.bot_data:
+        app.bot_data["state"] = BotState(window_size=DEFAULT_WINDOW_SIZE)
+    return app.bot_data["state"]
 
 
-def _get_float(name: str, default: float) -> float:
-    raw = _get_env(name, str(default))
-    try:
-        return float(raw)
-    except ValueError:
-        return default
+async def _refresh_fixed_message(context: ContextTypes.DEFAULT_TYPE, state, chat_id: int, force: bool = False) -> None:
+    from bot.core.formatter import render_report
+    from bot.telegram.messenger import ensure_fixed_message, edit_fixed_message
+    from bot.config import MIN_SECONDS_BETWEEN_EDITS
+
+    text = render_report(state)
+    await ensure_fixed_message(context.bot, state, chat_id, text)
+    await edit_fixed_message(
+        context.bot,
+        state,
+        text,
+        min_seconds_between_edits=MIN_SECONDS_BETWEEN_EDITS,
+        force=force,
+    )
 
 
-def _parse_admin_ids(raw: str) -> List[int]:
-    """
-    Aceita:
-      ADMIN_CHAT_ID="123"
-      ADMIN_CHAT_ID="123,456,789"
-      ADMIN_CHAT_ID=" 123  ,  456 "
-    """
-    raw = (raw or "").strip()
-    if not raw:
-        return []
-    parts = [p.strip() for p in raw.split(",")]
-    out: List[int] = []
-    for p in parts:
-        if not p:
-            continue
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from bot.config import is_admin
+    from bot.telegram.messenger import send_ephemeral
+
+    chat = update.effective_chat
+    if chat is None:
+        return
+
+    chat_id = chat.id
+    if not is_admin(chat_id):
+        return
+
+    state = _get_state(context)
+    state.running = True
+    state.awaiting_window_size = False
+    state.awaiting_window_size_chat_id = None
+
+    await _refresh_fixed_message(context, state, chat_id, force=True)
+    await send_ephemeral(context.bot, chat_id, "✅ Bot ligado. Vou atualizar o relatório nessa mensagem fixa.")
+
+
+async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from bot.config import is_admin
+    from bot.telegram.messenger import send_ephemeral
+
+    chat = update.effective_chat
+    if chat is None:
+        return
+
+    chat_id = chat.id
+    if not is_admin(chat_id):
+        return
+
+    state = _get_state(context)
+    state.running = False
+    state.awaiting_window_size = False
+    state.awaiting_window_size_chat_id = None
+
+    await send_ephemeral(context.bot, chat_id, "⏸️ Bot pausado. Use /start pra voltar.")
+
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from bot.config import is_admin
+    from bot.telegram.messenger import send_ephemeral
+
+    chat = update.effective_chat
+    if chat is None:
+        return
+
+    chat_id = chat.id
+    if not is_admin(chat_id):
+        return
+
+    state = _get_state(context)
+
+    status = "ON ✅" if state.running else "OFF ⏸️"
+    ws = "conectado ✅" if state.ws_connected else "desconectado ⚠️"
+
+    msg = (
+        "📈 STATUS\n\n"
+        f"• Bot: {status}\n\n"
+        f"• WS: {ws}\n\n"
+        f"• Janela atual: {state.window_size}\n\n"
+        f"• Total acumulado: {state.total_games}\n\n"
+        f"• Progresso: {state.progress_count()}/{state.window_size} ({state.progress_percent()}%)\n"
+    )
+    if state.ws_last_error:
+        msg += f"\n• Último erro WS: {state.ws_last_error}\n"
+
+    await send_ephemeral(context.bot, chat_id, msg)
+
+
+async def cmd_configurar_janela(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from bot.config import is_admin, validate_window_size, typical_window_values
+    from bot.telegram.messenger import send_ephemeral
+
+    chat = update.effective_chat
+    if chat is None:
+        return
+
+    chat_id = chat.id
+    if not is_admin(chat_id):
+        return
+
+    state = _get_state(context)
+    args = context.args or []
+
+    # Caso 1: veio número junto => aplica direto
+    if args:
+        raw = args[0].strip()
         try:
-            out.append(int(p))
+            n = int(raw)
         except ValueError:
-            continue
-    return out
+            await send_ephemeral(context.bot, chat_id, "❌ Isso não é número. Ex: /configurar_janela 20")
+            return
+
+        n = validate_window_size(n)
+        state.set_window_size(n)
+        state.awaiting_window_size = False
+        state.awaiting_window_size_chat_id = None
+
+        await send_ephemeral(context.bot, chat_id, f"✅ Nova janela configurada com sucesso: {n}\n\n🔄 Recalibrando…")
+        await _refresh_fixed_message(context, state, chat_id, force=True)
+        return
+
+    # Caso 2: sem args => entra em modo “aguardando”
+    state.awaiting_window_size = True
+    state.awaiting_window_size_chat_id = chat_id
+
+    tips = ", ".join(str(x) for x in typical_window_values())
+    await send_ephemeral(
+        context.bot,
+        chat_id,
+        "⚙️ Configurar Janela\n\n"
+        "Envie agora o número da janela.\n\n"
+        f"Valores típicos: {tips}\n\n"
+        "Exemplos:\n"
+        "/configurar_janela 5\n"
+        "/configurar_janela 20\n\n"
+        "Modo guiado:\n"
+        "/configurar_janela\n"
+        "20",
+    )
 
 
-# =========================
-# ENV (Railway Variables)
-# =========================
-TELEGRAM_BOT_TOKEN: str = _get_env("TELEGRAM_BOT_TOKEN", "")
+async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from bot.config import is_admin, validate_window_size
+    from bot.telegram.messenger import send_ephemeral
 
-ROULETTE_WS_URL: str = _get_env("ROULETTE_WS_URL", "wss://dga.pragmaticplaylive.net/ws")
-CASINO_ID: str = _get_env("CASINO_ID", "ppcdk00000005349")
-CURRENCY: str = _get_env("CURRENCY", "BRL")
-TABLE_KEY: int = _get_int("TABLE_KEY", 204)
+    chat = update.effective_chat
+    if chat is None:
+        return
 
-# Admin
-_ADMIN_RAW = _get_env("ADMIN_CHAT_ID", "")
-ADMIN_CHAT_IDS: List[int] = _parse_admin_ids(_ADMIN_RAW)
+    chat_id = chat.id
+    if not is_admin(chat_id):
+        return
 
-# Janela
-WINDOW_MIN: int = 5          # ✅ agora é 5
-WINDOW_MAX: int = 200        # pode subir se quiser, mas 200 já é seguro
+    state = _get_state(context)
 
-DEFAULT_WINDOW_SIZE: int = _get_int("DEFAULT_WINDOW_SIZE", 40)
-DEFAULT_WINDOW_SIZE = max(WINDOW_MIN, min(WINDOW_MAX, DEFAULT_WINDOW_SIZE))
+    # Só captura “20” solto se estiver aguardando janela
+    if not state.awaiting_window_size:
+        return
 
-# Anti-spam de edição (mensagem fixa)
-MIN_SECONDS_BETWEEN_EDITS: float = _get_float("MIN_SECONDS_BETWEEN_EDITS", 1.2)
+    if state.awaiting_window_size_chat_id is not None and state.awaiting_window_size_chat_id != chat_id:
+        return
 
+    text = (update.effective_message.text or "").strip()
 
-# =========================
-# API / Bot Rules
-# =========================
-def is_admin(chat_id: int) -> bool:
-    # Se você não setou ADMIN_CHAT_ID, deixa tudo bloqueado por segurança
-    if not ADMIN_CHAT_IDS:
-        return False
-    return int(chat_id) in ADMIN_CHAT_IDS
-
-
-def validate_window_size(n: int) -> int:
-    """
-    Normaliza a janela pro range permitido.
-    Agora aceita a partir de 5.
-    """
     try:
-        n = int(n)
-    except Exception:
-        return DEFAULT_WINDOW_SIZE
+        n = int(text)
+    except ValueError:
+        await send_ephemeral(context.bot, chat_id, "❌ Manda só o número. Ex: 5 ou 20")
+        return
 
-    if n < WINDOW_MIN:
-        return WINDOW_MIN
-    if n > WINDOW_MAX:
-        return WINDOW_MAX
-    return n
+    n = validate_window_size(n)
+    state.set_window_size(n)
+    state.awaiting_window_size = False
+    state.awaiting_window_size_chat_id = None
+
+    await send_ephemeral(context.bot, chat_id, f"✅ Nova janela configurada com sucesso: {n}\n\n🔄 Recalibrando…")
+    await _refresh_fixed_message(context, state, chat_id, force=True)
 
 
-def typical_window_values() -> List[int]:
-    """
-    Só pra mostrar sugestões no /help e /configurar_janela
-    (pode ajustar se quiser).
-    """
-    return [5, 10, 20, 40, 60, 80, 100]
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from bot.config import is_admin, typical_window_values
+    from bot.telegram.messenger import send_ephemeral
+
+    chat = update.effective_chat
+    if chat is None:
+        return
+
+    chat_id = chat.id
+    if not is_admin(chat_id):
+        return
+
+    tips = ", ".join(str(x) for x in typical_window_values())
+
+    msg = (
+        "🧾 COMANDOS\n\n"
+        "/start - inicia o robô\n\n"
+        "/stop - pausa o robô\n\n"
+        "/status - status rápido\n\n"
+        "/configurar_janela - muda janela\n\n"
+        f"Valores típicos: {tips}\n\n"
+        "Exemplos:\n"
+        "/configurar_janela 5\n"
+        "/configurar_janela 20\n\n"
+        "Modo guiado:\n"
+        "/configurar_janela\n"
+        "20\n"
+    )
+    await send_ephemeral(context.bot, chat_id, msg)
+
+
+async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from bot.telegram.messenger import send_ephemeral
+
+    chat = update.effective_chat
+    if chat is None:
+        return
+    await send_ephemeral(context.bot, chat.id, f"🆔 chat_id: {chat.id}")
+
+
+def build_handlers() -> List:
+    # ✅ GARANTIDO: é isso que o main.py importa
+    return [
+        CommandHandler("start", cmd_start),
+        CommandHandler("stop", cmd_stop),
+        CommandHandler("status", cmd_status),
+        CommandHandler("configurar_janela", cmd_configurar_janela),
+        CommandHandler("help", cmd_help),
+        CommandHandler("id", cmd_id),
+
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input),
+    ]
