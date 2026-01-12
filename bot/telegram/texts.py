@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import pytz
 
@@ -35,6 +35,7 @@ def header_block(roulette_name: str, date_str: str) -> str:
 
 
 def updated_time_block() -> str:
+    # fica claro no mobile que é fuso BR
     return f"⏱ Atualizado: {fmt_time_br()} (UTC−3)\n"
 
 
@@ -81,9 +82,11 @@ def count_block(
     baixos: int, pct_baixos: int,
     altos: int, pct_altos: int,
 ) -> str:
+    # detalhe: o cabeçalho (janela | total) vai PRA BAIXO em uma linha separada
     return (
         "\n\n"
-        f"📌 CONTAGEM (janela {window} | total {total_games})\n\n"
+        "📌 CONTAGEM\n\n"
+        f"(janela {window} | total {total_games})\n\n"
         f"• Pares: {pares} ({pct_pares}%)\n\n"
         f"• Ímpares: {impares} ({pct_impares}%)\n\n\n"
         f"• Vermelhos: {vermelhos} ({pct_vermelhos}%) 🔴\n\n"
@@ -96,18 +99,26 @@ def count_block(
 def zeros_block(window: int, zeros: int, pct_zeros: int) -> str:
     return (
         "\n\n"
-        f"📌 ZEROS (janela {window})\n\n"
+        "📌 ZEROS\n\n"
+        f"(janela {window})\n\n"
         f"• Quantidade de ZEROS: {zeros} ({pct_zeros}%) 🟢\n"
     )
 
 
 def _medal(i: int) -> str:
-    return "🥇" if i == 0 else ("🥈" if i == 1 else "🥉")
+    # medalha só pros 3 primeiros
+    if i == 0:
+        return "🥇"
+    if i == 1:
+        return "🥈"
+    if i == 2:
+        return "🥉"
+    return ""
 
 
 def dominance_duzias_block(window: int, items: List[RankItem]) -> str:
-    # items já vem ordenado
-    lines = []
+    # items já vem ordenado (maior % -> menor %)
+    lines: List[str] = []
     for i, it in enumerate(items[:3]):
         if it.key == "1ª":
             label = "1ª Dúzia (1–12)"
@@ -115,35 +126,49 @@ def dominance_duzias_block(window: int, items: List[RankItem]) -> str:
             label = "2ª Dúzia (13–24)"
         else:
             label = "3ª Dúzia (25–36)"
-        lines.append(f"• {label}: {it.pct}% {_medal(i)}")
+
+        medal = _medal(i)
+        suffix = f" {medal}" if medal else ""
+        lines.append(f"• {label}: {it.pct}%{suffix}")
+
     return (
         "\n\n"
-        f"📍 DOMINÂNCIA — DÚZIAS (janela {window} | ranking)\n\n"
+        "📍 DOMINÂNCIA — DÚZIAS\n\n"
+        f"(janela {window} | ranking)\n\n"
         + "\n\n".join(lines)
         + "\n"
     )
 
 
 def dominance_colunas_block(window: int, items: List[RankItem]) -> str:
-    lines = []
+    lines: List[str] = []
     for i, it in enumerate(items[:3]):
         label = f"{it.key} Coluna"
-        lines.append(f"• {label}: {it.pct}% {_medal(i)}")
+        medal = _medal(i)
+        suffix = f" {medal}" if medal else ""
+        lines.append(f"• {label}: {it.pct}%{suffix}")
+
     return (
         "\n\n"
-        f"📍 DOMINÂNCIA — COLUNAS (janela {window} | ranking)\n\n"
+        "📍 DOMINÂNCIA — COLUNAS\n\n"
+        f"(janela {window} | ranking)\n\n"
         + "\n\n".join(lines)
         + "\n"
     )
 
 
 def region_rank_block(window: int, items: List[RankItem]) -> str:
-    lines = []
-    for i, it in enumerate(items[:3]):
-        lines.append(f"• {it.key}: {it.pct}% {_medal(i)}")
+    # Agora imprime 4 regiões (se vier 4)
+    lines: List[str] = []
+    for i, it in enumerate(items[:4]):
+        medal = _medal(i)
+        suffix = f" {medal}" if medal else ""
+        lines.append(f"• {it.key}: {it.pct}%{suffix}")
+
     return (
         "\n\n"
-        f"📌 REGIÃO (janela {window} | ranking)\n\n"
+        "📌 REGIÃO\n\n"
+        f"(janela {window} | ranking)\n\n"
         + "\n\n".join(lines)
         + "\n"
     )

@@ -1,27 +1,16 @@
 ﻿from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional
 
 
+# =========================
+# CORES
+# =========================
 RED_NUMBERS = {
     1, 3, 5, 7, 9, 12, 14, 16, 18,
     19, 21, 23, 25, 27, 30, 32, 34, 36
 }
-
-# Call bets (clássicos)
-VOISINS_DU_ZERO = {22, 18, 29, 7, 28, 12, 35, 3, 26, 0, 32, 15, 19, 4, 21, 2, 25}
-ORPHELINS = {1, 20, 14, 31, 9, 6, 34, 17}
-JEU_ZERO = {0, 3, 12, 15, 26, 32, 35}
-
-
-def _to_int(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def get_cor(numero: int) -> str:
@@ -32,6 +21,9 @@ def get_cor(numero: int) -> str:
     return "Preto"
 
 
+# =========================
+# DÚZIA / COLUNA
+# =========================
 def get_duzia_key(numero: int) -> Optional[str]:
     if numero == 0:
         return None
@@ -55,6 +47,58 @@ def get_coluna_key(numero: int) -> Optional[str]:
     return "3ª"
 
 
+# =========================
+# REGIÕES (Call bets)
+# Observação importante:
+# - No cassino, "Jeu Zéro" é uma aposta que SOBREPOE Voisins.
+# - Pro nosso relatório, a gente quer % LIMPO (sem duplicar número),
+#   então usamos um "bucket" exclusivo:
+#   1) Jeu Zéro
+#   2) Voisins (sem Jeu Zéro)
+#   3) Orphelins
+#   4) Tiers
+# Assim a soma dá 100% (em cima da janela).
+# =========================
+JEU_ZERO = {0, 3, 12, 15, 26, 32, 35}
+
+VOISINS_DU_ZERO_FULL = {22, 18, 29, 7, 28, 12, 35, 3, 26, 0, 32, 15, 19, 4, 21, 2, 25}
+ORPHELINS = {1, 20, 14, 31, 9, 6, 34, 17}
+TIERS_DU_CYLINDRE = {27, 13, 36, 11, 30, 8, 23, 10, 5, 24, 16, 33}
+
+# Voisins "exclusivo" (tirando os números que já caem em Jeu Zéro)
+VOISINS_EXCLUSIVE = VOISINS_DU_ZERO_FULL - JEU_ZERO
+
+
+def get_region_bucket(numero: int) -> str:
+    """
+    Retorna UM bucket exclusivo pra não duplicar contagem:
+      - Jeu Zéro
+      - Voisins du Zéro
+      - Orphelins
+      - Tiers
+    """
+    if numero in JEU_ZERO:
+        return "Jeu Zéro"
+    if numero in VOISINS_EXCLUSIVE:
+        return "Voisins du Zéro"
+    if numero in ORPHELINS:
+        return "Orphelins"
+    # o resto cai em Tiers (cobre os números restantes do cilindro)
+    return "Tiers"
+
+
+# =========================
+# HELPERS
+# =========================
+def _to_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _pct(part: int, denom: int) -> int:
     if denom <= 0:
         return 0
@@ -69,8 +113,8 @@ class RankItem:
 
 @dataclass(frozen=True)
 class AnalyticsResult:
-    window: int              # label mostrado (ex: 20)
-    total_spins: int         # quantos números válidos entraram nessa janela (normalmente = window)
+    window: int
+    total_spins: int
 
     zeros: int
     pares: int
@@ -82,7 +126,6 @@ class AnalyticsResult:
     baixos: int
     altos: int
 
-    # percentuais “contagem”
     pct_zeros: int
     pct_pares: int
     pct_impares: int
@@ -91,10 +134,9 @@ class AnalyticsResult:
     pct_baixos: int
     pct_altos: int
 
-    # ranking (maior % -> menor %)
     duzias_rank: List[RankItem]
     colunas_rank: List[RankItem]
-    regioes_rank: List[RankItem]
+    regioes_rank: List[RankItem]  # agora vem 4 itens: Voisins, Tiers, Orphelins, Jeu Zéro (ordenados)
 
 
 def compute_analytics(results: Iterable[Dict[str, Any]], window_label: int) -> AnalyticsResult:
@@ -110,16 +152,19 @@ def compute_analytics(results: Iterable[Dict[str, Any]], window_label: int) -> A
     zeros = sum(1 for n in nums if n == 0)
     nonzero = total_spins - zeros
 
+    # pares/ímpares: zero NÃO entra
     pares = sum(1 for n in nums if n != 0 and n % 2 == 0)
     impares = sum(1 for n in nums if n != 0 and n % 2 == 1)
 
+    # cores: zero NÃO entra
     vermelhos = sum(1 for n in nums if n != 0 and get_cor(n) == "Vermelho")
     pretos = sum(1 for n in nums if n != 0 and get_cor(n) == "Preto")
 
+    # baixos/altos: zero NÃO entra
     baixos = sum(1 for n in nums if 1 <= n <= 18)
     altos = sum(1 for n in nums if 19 <= n <= 36)
 
-    # % (zeros em cima do total, resto em cima do nonzero)
+    # %: zeros em cima do total, resto em cima do nonzero
     pct_zeros = _pct(zeros, total_spins)
     pct_pares = _pct(pares, nonzero)
     pct_impares = _pct(impares, nonzero)
@@ -128,7 +173,7 @@ def compute_analytics(results: Iterable[Dict[str, Any]], window_label: int) -> A
     pct_baixos = _pct(baixos, nonzero)
     pct_altos = _pct(altos, nonzero)
 
-    # dominância dúzias/colunas (em cima do nonzero)
+    # dominância (dúzias/colunas) em cima do nonzero
     duzia_counts = {"1ª": 0, "2ª": 0, "3ª": 0}
     coluna_counts = {"1ª": 0, "2ª": 0, "3ª": 0}
 
@@ -145,23 +190,26 @@ def compute_analytics(results: Iterable[Dict[str, Any]], window_label: int) -> A
     duzias_rank = [RankItem(k, _pct(v, nonzero)) for k, v in duzia_counts.items()]
     colunas_rank = [RankItem(k, _pct(v, nonzero)) for k, v in coluna_counts.items()]
 
-    # ordena por % desc, e desempata pela ordem tradicional 1ª,2ª,3ª (estável)
     order = {"1ª": 1, "2ª": 2, "3ª": 3}
     duzias_rank.sort(key=lambda x: (-x.pct, order.get(x.key, 99)))
     colunas_rank.sort(key=lambda x: (-x.pct, order.get(x.key, 99)))
 
-    # regiões (hit rate em cima do total_spins) — pode sobrepor, mas ranking é o que importa
-    voisins_hits = sum(1 for n in nums if n in VOISINS_DU_ZERO)
-    orphelins_hits = sum(1 for n in nums if n in ORPHELINS)
-    jeu_hits = sum(1 for n in nums if n in JEU_ZERO)
+    # regiões (4 buckets exclusivos) em cima do total_spins
+    region_counts = {
+        "Voisins du Zéro": 0,
+        "Tiers": 0,
+        "Orphelins": 0,
+        "Jeu Zéro": 0,
+    }
 
-    regioes_rank = [
-        RankItem("Voisins du Zéro", _pct(voisins_hits, total_spins)),
-        RankItem("Orphelins", _pct(orphelins_hits, total_spins)),
-        RankItem("Jeu Zéro", _pct(jeu_hits, total_spins)),
-    ]
-    # ranking por % desc (desempate por ordem fixa)
-    region_order = {"Voisins du Zéro": 1, "Orphelins": 2, "Jeu Zéro": 3}
+    for n in nums:
+        bucket = get_region_bucket(n)
+        region_counts[bucket] += 1
+
+    regioes_rank = [RankItem(k, _pct(v, total_spins)) for k, v in region_counts.items()]
+
+    # ranking por % desc, com ordem fixa de desempate
+    region_order = {"Voisins du Zéro": 1, "Tiers": 2, "Orphelins": 3, "Jeu Zéro": 4}
     regioes_rank.sort(key=lambda x: (-x.pct, region_order.get(x.key, 99)))
 
     return AnalyticsResult(
